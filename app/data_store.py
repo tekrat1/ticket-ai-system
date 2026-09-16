@@ -60,8 +60,29 @@ class DataStore:
         if n_bad_dates:
             logger.warning("%d rows had unparseable created_at values", n_bad_dates)
 
+        df["hours_to_resolve"] = self._compute_hours_to_resolve(df)
+
         logger.info("Loaded %d tickets from %s", len(df), path)
         return df
+
+    @staticmethod
+    def _compute_hours_to_resolve(df: pd.DataFrame) -> pd.Series:
+        """Derived column, not in the raw CSV: how long a ticket has actually
+        taken against a 'resolved within N hours' style question.
+
+        - Resolved tickets: just resolution_time_hrs.
+        - Still-open/escalated tickets: hours elapsed since created_at, i.e.
+          "it's been open this long and counting". A ticket that's been open
+          20h with a 12h SLA should show up as a miss even though it has no
+          resolution_time_hrs yet.
+
+        Without this, "critical tickets not resolved within 12 hours" has
+        nothing sensible to filter on (resolution_time_hrs is null for the
+        unresolved ones, which is the whole point of the question).
+        """
+        now = pd.Timestamp.now()
+        elapsed = (now - df["created_at"]).dt.total_seconds() / 3600
+        return df["resolution_time_hrs"].where(df["status"] == "Resolved", elapsed)
 
     def reload(self) -> None:
         """Re-reads the CSV from disk (useful if the file is updated at runtime)."""

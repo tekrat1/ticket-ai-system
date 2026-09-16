@@ -32,6 +32,8 @@ ALLOWED_COLUMNS = {
     "ticket_id", "created_at", "category", "priority", "status",
     "response_time_hrs", "resolution_time_hrs", "agent_id",
     "customer_rating", "issue_summary",
+    # derived in data_store.py, not a raw CSV column - see its docstring
+    "hours_to_resolve",
 }
 ALLOWED_OPERATORS = {"==", "!=", ">", "<", ">=", "<=", "contains"}
 ALLOWED_AGG_FUNCS = {"count", "mean", "sum", "min", "max", "nunique", "median"}
@@ -52,6 +54,12 @@ Columns (name: type — meaning):
 - agent_id: string — support agent handling the ticket
 - customer_rating: int 1-5, nullable — nullable if unresolved
 - issue_summary: string — free text
+- hours_to_resolve: float, never null — resolution_time_hrs for resolved tickets,
+  otherwise hours elapsed since created_at (i.e. how long it's been sitting open).
+  Use THIS column for "resolved/not resolved within N hours" questions, never
+  response_time_hrs (that's time-to-first-reply, a different thing) and never
+  resolution_time_hrs alone (it's null for exactly the unresolved tickets the
+  question usually cares about).
 
 Output schema (all keys optional except "intent"):
 {
@@ -69,6 +77,8 @@ Rules:
 - Only use column names exactly as listed above.
 - "critical"/"high priority" etc map to the priority column values (Low/Medium/High/Critical).
 - "unresolved"/"not resolved"/"open" tickets -> filter status != "Resolved" unless the user clearly means only status == "Open".
+- "not resolved within N hours" / "still open after N hours" -> filter hours_to_resolve > N (do not use response_time_hrs here).
+- "resolved within N hours" (positive phrasing) -> filter status == "Resolved" AND hours_to_resolve <= N.
 - For "average X" -> intent "aggregate" or "groupby_agg", agg_func "mean".
 - For "which agent has the ... rating/most tickets" -> intent "groupby_agg", groupby "agent_id".
 - For plain counts -> intent "aggregate", agg_func "count".
@@ -229,14 +239,15 @@ def _fallback_spec(question: str) -> dict:
         return {"intent": "groupby_agg", "groupby": "agent_id", "agg_column": "customer_rating",
                 "agg_func": "mean", "sort_desc": False, "limit": 5}
 
-    m = re.search(r"critical.*not resolved within (\d+)\s*hours?", q)
-    if m or ("critical" in q and "not resolved" in q):
-        hours = float(m.group(1)) if m else 12
-        return {"intent": "list", "filters": [
-            {"column": "priority", "operator": "==", "value": "Critical"},
-            {"column": "status", "operator": "!=", "value": "Resolved"},
-            {"column": "response_time_hrs", "operator": ">", "value": hours},
-        ], "limit": 100}
+    if "not resolved within" in q or "still open after" in q:
+        hours_match = re.search(r"(\d+)\s*hours?", q)
+        hours = float(hours_match.group(1)) if hours_match else 12
+        priority_match = re.search(r"\b(low|medium|high|critical)\b", q)
+
+        filters = [{"column": "hours_to_resolve", "operator": ">", "value": hours}]
+        if priority_match:
+            filters.insert(0, {"column": "priority", "operator": "==", "value": priority_match.group(1).capitalize()})
+        return {"intent": "list", "filters": filters, "limit": 100}
 
     if "average" in q and "rating" in q and "technical" in q:
         return {"intent": "aggregate", "filters": [{"column": "category", "operator": "==", "value": "Technical"}],

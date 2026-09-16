@@ -58,6 +58,12 @@ CSV --> DataStore (pandas, typed) --> QueryEngine  --> FastAPI --> Streamlit UI
   never deals with raw strings. 500 rows doesn't justify a database; the
   "Scaling" section below covers what changes if the dataset grows.
 
+  It also adds one derived column, `hours_to_resolve`, that isn't in the raw
+  CSV: `resolution_time_hrs` for resolved tickets, otherwise hours elapsed
+  since `created_at`. Questions like "not resolved within N hours" need this
+  — `resolution_time_hrs` is null for exactly the unresolved tickets the
+  question is asking about, so filtering on it directly can't work.
+
 - **NL query handling (`app/query_engine.py`) — the core design decision:**
   the LLM is **not** allowed to generate or execute arbitrary pandas/Python
   code. Instead it translates the question into a small, constrained JSON
@@ -115,6 +121,18 @@ curl -X POST localhost:8000/query -H "Content-Type: application/json" \
 ```
 ```json
 {"answer": "Top result: agent_id=AGT-09 with agg value = 37 (showing 5 group(s) total).", ...}
+```
+
+```bash
+curl -X POST localhost:8000/query -H "Content-Type: application/json" \
+  -d '{"question": "Show me all Critical tickets not resolved within 12 hours."}'
+```
+```json
+{"answer": "Found 34 matching ticket(s).", "row_count": 34,
+ "query_spec": {"intent": "list", "filters": [
+   {"column": "priority", "operator": "==", "value": "Critical"},
+   {"column": "hours_to_resolve", "operator": ">", "value": 12.0}
+ ], "limit": 100}, ...}
 ```
 
 ```bash
