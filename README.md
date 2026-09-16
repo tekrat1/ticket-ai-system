@@ -1,27 +1,26 @@
 # Support Ticket AI System
 
-An AI-powered system over a customer support ticket dataset (CSV) that:
-- ingests the CSV and makes it queryable,
-- answers natural-language questions about the data,
-- detects and flags anomalies (unresolved high-priority tickets, statistical
-  outliers in response/resolution time),
-- exposes everything via a REST API **and** a minimal Streamlit UI.
+An AI system built on top of a customer support ticket CSV. It can:
+- load the CSV and let you query it,
+- answer plain English questions about the tickets,
+- flag anomalies (tickets stuck open too long, weird outliers in resolution time),
+- and expose all of that through a REST API plus a small Streamlit UI.
 
 ## 1. Setup
 
 ```bash
 git clone <this repo>
 cd ticket-ai-system
-cp .env.example .env   # optional — see "LLM provider" below
-./start.sh              # single command: installs deps, starts API + UI
+cp .env.example .env   # optional, see LLM provider section below
+./start.sh              # installs deps, starts API + UI, one command
 ```
 
-- API: http://localhost:8000 (interactive docs at `/docs`)
-- UI: http://localhost:8501
+- API runs at http://localhost:8000 (docs at `/docs`)
+- UI runs at http://localhost:8501
 
-`start.sh` is a bash script (macOS/Linux, or WSL/Git Bash on Windows). On plain
-Windows (PowerShell/cmd) without Git Bash or WSL, use the manual two-process
-version below instead:
+`start.sh` needs bash, so it works on macOS/Linux, or WSL/Git Bash on Windows.
+If you're on plain Windows without either, just run the two processes
+manually:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
@@ -30,21 +29,22 @@ uvicorn main:app --reload          # terminal 1
 streamlit run ui/app.py            # terminal 2
 ```
 
-Run the tests: `pytest tests/ -v`
+Tests: `pytest tests/ -v`
 
-### LLM provider (zero cost, either works)
+### LLM provider
 
-Set in `.env` via `LLM_PROVIDER`:
+You set this in `.env` with `LLM_PROVIDER`:
 
-| Value | What it needs | Notes |
+| Value | Needs | Notes |
 |---|---|---|
-| `groq` | `GROQ_API_KEY` from [console.groq.com](https://console.groq.com) (free, no card) | Fastest to set up; recommended for the walkthrough |
-| `ollama` | Local [Ollama](https://ollama.com) + `ollama pull llama3.1` | Fully offline |
-| `none` (default) | nothing | Falls back to a rule-based query parser — the system still runs and answers the sample queries with **zero setup**, it just isn't using an LLM |
+| `groq` | `GROQ_API_KEY` from console.groq.com (free, no card needed) | Easiest, takes like 30 seconds to get a key |
+| `ollama` | Local Ollama running + `ollama pull llama3.1` | Works fully offline if you'd rather not sign up for anything |
+| `none` | nothing | Falls back to a simple rule-based parser, works out of the box with zero setup |
 
-The evaluator can run the whole system with no keys at all and see it work;
-setting `LLM_PROVIDER=groq` (30 seconds, free signup) is what actually
-exercises the LLM integration being graded.
+I set the default to `groq` in `.env.example` since the point of this
+assessment is showing the LLM actually doing the NL parsing, not the
+fallback. But if you just want to see it run without grabbing a key first,
+`none` still answers the sample questions fine.
 
 ## 2. Architecture
 
@@ -53,57 +53,61 @@ CSV --> DataStore (pandas, typed) --> QueryEngine  --> FastAPI --> Streamlit UI
                                     \-> AnomalyDetector /
 ```
 
-**Why this shape:**
+**Why I built it this way:**
 
-- **DataStore (`app/data_store.py`)** — one pandas DataFrame, loaded once at
-  startup, with type coercion on read (dates, numerics) so downstream code
-  never deals with raw strings. 500 rows doesn't justify a database; the
-  "Scaling" section below covers what changes if the dataset grows.
+`DataStore` (`app/data_store.py`) is just one pandas DataFrame loaded at
+startup, with the columns coerced to proper types instead of trusting
+whatever's in the CSV. With 500 rows there's no real reason to reach for a
+database here.
 
-  It also adds one derived column, `hours_to_resolve`, that isn't in the raw
-  CSV: `resolution_time_hrs` for resolved tickets, otherwise hours elapsed
-  since `created_at`. Questions like "not resolved within N hours" need this
-  — `resolution_time_hrs` is null for exactly the unresolved tickets the
-  question is asking about, so filtering on it directly can't work.
+One thing worth calling out: I added a column that's not in the raw
+CSV, `hours_to_resolve`. For resolved tickets it's just
+`resolution_time_hrs`. For tickets still open, it's hours since
+`created_at`. I needed this because a question like "not resolved within 12
+hours" has nothing to filter on otherwise — `resolution_time_hrs` is null
+for exactly the tickets that question cares about, since they haven't
+resolved yet. Took me a minute to realize why my first pass at that query
+was returning zero rows.
 
-- **NL query handling (`app/query_engine.py`) — the core design decision:**
-  the LLM is **not** allowed to generate or execute arbitrary pandas/Python
-  code. Instead it translates the question into a small, constrained JSON
-  "query spec" (`filters` + optional `groupby`/`agg_func`), which is then
-  run by our own whitelisted interpreter (`ALLOWED_COLUMNS`,
-  `ALLOWED_OPERATORS`, `ALLOWED_AGG_FUNCS`). This bounds what a
-  hallucinating or adversarially-prompted LLM output can actually do to
-  "pick a valid column/operator/value" — never "run this code". The final
-  answer text is templated from the *executed* result, not re-generated by
-  the LLM, so the stated numbers can never drift from the real data.
+For the NL query part (`app/query_engine.py`) — this is probably the
+decision I spent the most time on. I didn't want the LLM generating or
+running raw pandas/Python, because that's a good way to get a hallucinated
+column name or something worse running against real data. Instead the LLM
+just outputs a small JSON "query spec" (filters + optional groupby/agg),
+and my own code executes that against a whitelist of allowed columns,
+operators, and agg functions. So the LLM's job is picking valid options
+from a menu, not writing code. The answer text also gets built from the
+actual query result afterward, not generated separately by the LLM, so the
+numbers it reports can't drift from what's really in the data.
 
-  If no LLM is configured, or its JSON fails validation, `query_engine.py`
-  falls back to a small rule-based parser covering the sample queries from
-  the brief — so a failed/misconfigured LLM call degrades gracefully
-  instead of crashing the request.
+If there's no LLM configured, or the JSON it returns doesn't validate, it
+falls back to a small rule-based parser that covers the sample questions
+from the brief. Didn't want a misconfigured API key to just break the whole
+thing.
 
-- **Anomaly detection (`app/anomaly.py`)** deliberately does **not** use the
-  LLM. It's a numeric/statistical problem (IQR outlier detection on
-  response/resolution time, computed per-category; a threshold rule for
-  stale unresolved high-priority tickets) where a deterministic method is
-  more reliable and auditable than an LLM guess. Every flagged ticket
-  carries a human-readable `reason` and which `rule` fired.
+Anomaly detection (`app/anomaly.py`) doesn't touch the LLM at all, on
+purpose. It's IQR-based outlier detection on response/resolution times per
+category, plus a threshold check for high-priority tickets that have sat
+open too long. Felt like a case where a plain statistical rule is more
+trustworthy than asking a model to eyeball it. Each flagged ticket comes
+with a `reason` string and which rule triggered it, so it's at least
+explainable.
 
-- **API (`main.py`)** — FastAPI with `/health`, `/query`, `/anomalies`,
-  and a `/reload` convenience endpoint. Pydantic schemas
-  (`app/schemas.py`) validate both directions.
+API (`main.py`) is FastAPI, four endpoints: `/health`, `/query`,
+`/anomalies`, and `/reload` (just re-reads the CSV without restarting,
+handy while testing). Pydantic schemas validate requests and responses.
 
-- **UI (`ui/app.py`)** — Streamlit, calls the API over HTTP rather than
-  importing the backend directly, so it's a genuine client of the same
-  contract an external caller would use.
+UI (`ui/app.py`) is Streamlit, and it talks to the API over plain HTTP
+rather than importing the backend code directly — figured it should behave
+like any other client hitting the same API contract.
 
-### Models / tools used
-- LLM: Groq free tier (`llama-3.1-8b-instant`) or local Ollama (`llama3.1`) — pluggable via `app/llm_client.py`.
-- Data: pandas.
-- API: FastAPI + Pydantic + uvicorn.
-- UI: Streamlit.
+### Tools used
+- LLM: Groq free tier (`llama-3.1-8b-instant`), or local Ollama (`llama3.1`) — swappable in `app/llm_client.py`
+- pandas for the data
+- FastAPI + Pydantic + uvicorn for the API
+- Streamlit for the UI
 
-## 3. Example queries and outputs
+## 3. Example queries
 
 ```bash
 curl -X POST localhost:8000/query -H "Content-Type: application/json" \
@@ -144,38 +148,38 @@ curl localhost:8000/anomalies
 {"count": 102, "anomalies": [{"ticket_id": "TKT-007", "reason": "High priority, still 'Open' after 23256.3h (threshold: 24h)", "rule": "unresolved_high_priority_over_24h", "severity": "high", ...}, ...]}
 ```
 
-All four verified against the live server during development (see `tests/test_basic.py`).
+Tested these against a live server while building this, see `tests/test_basic.py`.
 
 ## 4. Known limitations
 
-- **Dataset dates are from 2024; the system checks "now" against them.**
-  Because the CSV's `created_at` values are all in the past relative to
-  whenever this is run, the "unresolved >24h" rule will flag nearly every
-  currently-unresolved ticket, not just recently-stale ones. In production
-  this rule should compare against the dataset's own "as-of" time, or the
-  threshold should be reframed as "still unresolved N hours after a
-  configurable reference time" — noted here rather than silently patched,
-  since the brief's phrasing ("older than 24 hours") is genuinely ambiguous
-  about whether "now" means wall-clock time or the dataset's recency.
-- The LLM query planner handles single-table filter/groupby/aggregate
-  questions well; it does not attempt multi-step reasoning (e.g. queries
-  requiring two sequential aggregations) — those fall through to
-  `{"intent": "unsupported"}` with a clear message rather than a wrong answer.
-- No authentication on the API — fine for a local assessment, not for
-  production.
-- The rule-based fallback parser only covers the sample query *patterns*
-  from the brief, not arbitrary phrasing — it exists so the system is
-  demoable at zero setup, not as a replacement for the LLM path.
-- Anomaly thresholds (24h, IQR ×1.5) are reasonable defaults, not tuned
-  against a labeled anomaly set (none was provided).
+- The dataset's `created_at` values are all from 2024, but the "unresolved
+  for >24h" rule compares against whatever "now" actually is. So basically
+  every open ticket ends up flagged, since they're all technically 20,000+
+  hours old by this point, not just the ones that went stale recently. I
+  noticed this while testing and honestly wasn't sure if the brief meant
+  wall-clock time or "recent relative to the dataset," so I left it as-is
+  and I'm flagging it here rather than quietly hacking around it. A real
+  fix would compare against a configurable "as of" timestamp instead of
+  `datetime.now()`.
+- The query planner handles single filter/groupby/aggregate questions fine
+  but doesn't do multi-step reasoning — if a question needs two chained
+  aggregations, it just returns `{"intent": "unsupported"}` with a message
+  instead of guessing.
+- No auth on the API. Fine for this, not something you'd ship.
+- The rule-based fallback only really covers the sample question patterns
+  from the brief, it's not a general parser — it's there so the system
+  still works with zero setup, not as a real substitute for the LLM path.
+- The anomaly thresholds (24h, 1.5x IQR) are just reasonable-sounding
+  defaults. No labeled anomaly set was provided to actually tune them
+  against.
 
-## 5. What I'd improve with more time
-- Two-way LLM+rules blending: use the LLM to also *phrase* the rule-based
-  fallback's answer in natural language (currently only the LLM path's
-  answer text is template-based; the fallback is too, for consistency).
-- Push the DataFrame into DuckDB for larger datasets / SQL-native filters,
-  keeping the same JSON-spec-to-execution boundary (swap the interpreter,
-  not the LLM contract).
-- Add conversation memory so follow-up questions ("...and for Billing
-  only?") reuse the prior filter context.
-- Chart the anomaly severity/category breakdown in the UI instead of a flat table.
+## 5. What I'd do with more time
+- Have the LLM also phrase the fallback parser's answers, right now only
+  the LLM path's response text is templated nicely, the fallback path is
+  more basic.
+- Move the DataFrame into DuckDB once the dataset gets bigger, so filtering
+  can happen in SQL instead of pandas, without changing how the LLM's JSON
+  spec gets interpreted.
+- Some kind of conversation memory, so a follow-up like "and just for
+  Billing?" reuses the previous filters instead of starting over.
+- Show the anomaly breakdown as a chart in the UI instead of a flat table.
