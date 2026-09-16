@@ -8,7 +8,13 @@ cd "$(dirname "$0")"
 if [ ! -d ".venv" ]; then
   python3 -m venv .venv
 fi
-source .venv/bin/activate
+
+if [ -f ".venv/bin/activate" ]; then
+  source .venv/bin/activate
+else
+  source .venv/Scripts/activate
+fi
+
 pip install -q -r requirements.txt
 
 if [ -f ".env" ]; then
