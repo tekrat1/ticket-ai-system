@@ -19,10 +19,12 @@ cp .env.example .env   # optional — see "LLM provider" below
 - API: http://localhost:8000 (interactive docs at `/docs`)
 - UI: http://localhost:8501
 
-If you'd rather run the two processes yourself:
+`start.sh` is a bash script (macOS/Linux, or WSL/Git Bash on Windows). On plain
+Windows (PowerShell/cmd) without Git Bash or WSL, use the manual two-process
+version below instead:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate    # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 uvicorn main:app --reload          # terminal 1
 streamlit run ui/app.py            # terminal 2
